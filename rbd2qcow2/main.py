@@ -100,12 +100,15 @@ async def do_transfer(
             size_nonzero = 0
             log.warning('Image %s was not changed since last backup. Skipping any transfers.', rbd_image_name)
 
-
         qcow2_directory = os.path.dirname(os.path.realpath(qcow2_name))
         tmp_filename = tempfile.mktemp(prefix='qcow2_', dir=qcow2_directory)
         try:
             log.info('Creating image %s of virtual size %2.2f GB.', qcow2_name, size / 1000000000)
-            create_qcow2_image(tmp_filename, size, backing_store_filename)
+            # Only pass backing_store_filename if not None
+            if backing_store_filename:
+                create_qcow2_image(tmp_filename, size, backing_store_filename)
+            else:
+                create_qcow2_image(tmp_filename, size)
             if rbd_read_operations:
                 if size_nonzero:
                     do_fallocate(tmp_filename, size_nonzero)
@@ -120,19 +123,17 @@ async def do_transfer(
                     raise
                 else:
                     log.debug('Terminating NBD connection.')
-                    await nbd_client.quit()  # TODO: CancelledErrorwhile quitting should be trapped with nbd_client.abort()
+                    await nbd_client.quit()
             else:
                 log.info('Image was not changed, skipping any transfers.')
 
             log.debug('Fsyncing %s.', tmp_filename)
-            # workaround for opening image as unsafe
             with open(tmp_filename, 'rb') as xxx:
                 os.fsync(xxx.fileno())
             log.debug('Fsyncing complete.')
 
             os.chmod(tmp_filename, 0o400)
             os.rename(tmp_filename, qcow2_name)
-            # Safe rename
             fd = os.open(qcow2_directory, os.O_DIRECTORY | os.O_RDONLY)
             try:
                 os.fsync(fd)
@@ -185,6 +186,7 @@ async def do_backup(rbd_image_name: str, loop, ioctx):
     rbd_new_snapshot_name = str(curr_ts)
 
     with rbd.Image(ioctx, rbd_image_name) as rbd_image:
+        log.info('\n----- Image %r -----', rbd_image_name)
         if check_skip_backup(rbd_image):
             log.info('Image %r skipped.', rbd_image_name)
             return
@@ -198,12 +200,8 @@ async def do_backup(rbd_image_name: str, loop, ioctx):
             os.makedirs(xxx)
         latest_ts = get_latest_backup(xxx, rbd_image_name)
         if latest_ts == 0:
-            log.info('Did not found previous backup for image %s.', rbd_image_name)
-            empty_image_path = os.path.join(xxx, 'empty.qcow2')
-            if not os.path.exists(empty_image_path):
-                log.info('Creating empty base qcow2 image.')
-                create_qcow2_image(empty_image_path, 1024 * 1024)
-            backing_store_filename = 'empty.qcow2'
+            log.info('Did not find previous backup for image %s. Creating full backup.', rbd_image_name)
+            backing_store_filename = None
             rbd_base_snapshot = None
         else:
             if latest_ts > curr_ts:
