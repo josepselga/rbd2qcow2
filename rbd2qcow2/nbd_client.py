@@ -32,6 +32,7 @@ NBD_FLAG_SEND_RESIZE = 1024
 
 NBD_REQUEST_MAGIC = 0x25609513
 NBD_REPLY_MAGIC = 0x67446698
+NBD_OPTS_MAGIC = 0x49484156454F5054  # (IHAVEOPT)
 
 log = logging.getLogger(__name__)
 
@@ -304,14 +305,37 @@ async def open_image(image_filename: str) -> NBDClient:
         os.unlink(sockpath)
         buf = await reader.readexactly(16)
 
+        # Old NBD protocol implementation.
         if buf == b'NBDMAGIC\x00\x00\x42\x02\x81\x86\x12\x53':
             buf = await reader.readexactly(8 + 4)
             (size, flags) = struct.unpack(">QL", buf)
             if not (flags & NBD_FLAG_HAS_FLAGS):
                 raise RuntimeError('Flags not supported. VERY old NBD server ?')
             await reader.readexactly(124)
+        # New NBD protocol implementation.
         elif buf == b'NBDMAGICIHAVEOPT':
-            raise NotImplementedError('New-style negotiation is not implemented yet.')
+            log.info("Server supports new-style (IHAVEOPT) negotiation.")
+            # Server sends 2 bytes of global flags.
+            global_flags = struct.unpack('>H', await reader.readexactly(2))[0]
+            log.debug(f"Server global flags: {hex(global_flags)}")
+            # Client must reply with its own flags.
+            # NBD_FLAG_C_FIXED_NEWSTYLE = 1
+            client_flags = struct.pack('>I', 1)
+            writer.write(client_flags)
+            await writer.drain()
+            # Client requests the default export.
+            log.debug("Sending NBD_OPT_EXPORT_NAME request...")
+            # NBD_OPTS_MAGIC, NBD_OPT_EXPORT_NAME (1), length (0)
+            writer.write(struct.pack('>QII', NBD_OPTS_MAGIC, 1, 0))
+            await writer.drain()
+            # Server replies with export info.
+            log.debug("Waiting for server's export response...")
+            # Size (8 bytes) + flags (2 bytes)
+            export_info = await reader.readexactly(10)
+            (size, flags) = struct.unpack('>QH', export_info)
+            log.debug(f"Export received: size={size}, flags={hex(flags)}")
+            # Consume 124 bytes of trailing zeroes.
+            await reader.readexactly(124)
         else:
             raise RuntimeError('Protocol error during negotiation: %s.', ' '.join(hex(i) for i in buf[8:]))
 
