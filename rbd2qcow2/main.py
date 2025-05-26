@@ -346,7 +346,12 @@ def main():
     try:
         run_async_task(loop, async_main(loop))
         gc.collect()  # garbage collect complete tasks
-        for t in asyncio.Task.all_tasks(loop):
+        # Compatibility: Python <3.7 -> asyncio.Task.all_tasks, >=3.7 -> asyncio.all_tasks
+        try:
+            all_tasks = asyncio.all_tasks
+        except AttributeError:
+            all_tasks = asyncio.Task.all_tasks
+        for t in all_tasks(loop):
             log.debug('BUG: Incomplete tasks: %r.', t)
     finally:
         loop.close()
